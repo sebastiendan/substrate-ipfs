@@ -419,7 +419,8 @@ impl ResponseBody {
 }
 
 impl Iterator for ResponseBody {
-	type Item = u8;
+	// type Item = u8;
+	type Item = Vec<u8>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.error.is_some() {
@@ -451,8 +452,10 @@ impl Iterator for ResponseBody {
 			return self.next();
 		}
 
-		let result = self.buffer[self.position];
-		self.position += 1;
+		// let result = self.buffer[self.position];
+		// self.position += 1;
+		let result = self.buffer[self.position .. self.filled_up_to.unwrap()].to_vec();
+		self.position = self.filled_up_to.unwrap();
 		Some(result)
 	}
 }

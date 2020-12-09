@@ -551,10 +551,10 @@ impl<T: Trait> Module<T> {
 		// Next we want to fully read the response body and collect it to a vector of bytes.
 		// Note that the return object allows you to read the body in chunks as well
 		// with a way to control the deadline.
-		let body = response.body().collect::<Vec<u8>>();
+		let body = response.body().collect::<Vec<Vec<u8>>>();
 
 		// Create a str slice from the body.
-		let body_str = sp_std::str::from_utf8(&body).map_err(|_| {
+		let body_str = sp_std::str::from_utf8(&body[0]).map_err(|_| {
 			debug::warn!("No UTF8 body");
 			http::Error::Unknown
 		})?;

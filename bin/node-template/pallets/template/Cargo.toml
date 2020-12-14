@@ -25,17 +25,22 @@ default-features = false
 version = "2.0.0"
 path = "../../../../frame/system"
 
-[dev-dependencies.sp-core]
+[dependencies.sp-core]
 default-features = false
 version = "2.0.0"
 path = "../../../../primitives/core"
 
-[dev-dependencies.sp-io]
+[dependencies.sp-std]
+default-features = false
+version = "2.0.0"
+path = "../../../../primitives/std"
+
+[dependencies.sp-io]
 default-features = false
 version = "2.0.0"
 path = "../../../../primitives/io"
 
-[dev-dependencies.sp-runtime]
+[dependencies.sp-runtime]
 default-features = false
 version = "2.0.0"
 path = "../../../../primitives/runtime"
@@ -46,5 +51,7 @@ default = ['std']
 std = [
 	'codec/std',
 	'frame-support/std',
-	'frame-system/std'
+	'frame-system/std',
+	'sp-runtime/std',
+  'sp-std/std',
 ]

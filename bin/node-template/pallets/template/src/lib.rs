@@ -4,6 +4,8 @@
 extern crate alloc;
 
 use alloc::{fmt, string::String};
+use alt_serde::{Deserialize, Deserializer};
+use base64;
 use codec::{Encode, Decode};
 use frame_support::{
 	debug, decl_module, decl_storage, decl_event, decl_error, dispatch::DispatchResult, traits::Get,
@@ -52,6 +54,22 @@ pub mod crypto {
 		type GenericSignature = sp_core::sr25519::Signature;
 		type GenericPublic = sp_core::sr25519::Public;
 	}
+}
+
+#[serde(crate = "alt_serde")]
+#[derive(Deserialize, Encode, Decode, Default)]
+struct ReceivedMessage {
+    // Specify our own deserializing function to convert JSON string to vector of bytes
+    #[serde(deserialize_with = "de_string_to_bytes")]
+    from: Vec<u8>,
+    #[serde(deserialize_with = "de_string_to_bytes")]
+    data: Vec<u8>,
+}
+
+pub fn de_string_to_bytes<'de, D>(de: D) -> Result<Vec<u8>, D::Error>
+where D: Deserializer<'de> {
+    let s: &str = Deserialize::deserialize(de)?;
+    Ok(s.as_bytes().to_vec())
 }
 
 #[cfg(test)]
@@ -281,7 +299,12 @@ impl<T: Trait> Module<T> {
 		let mut response_body = response.body();
 
 		let response_data = response_body
-			.inspect(|msg| debug::info!("Received msg: {:?}", msg))
+			.inspect(|msg| {
+				let response_data_str = str::from_utf8(msg).unwrap();
+				let received_message: ReceivedMessage = serde_json::from_str(&response_data_str).unwrap();
+				let received_message_str = str::from_utf8(&received_message.data).unwrap();
+				debug::info!("Received msg: {:?}", str::from_utf8(&base64::decode(&received_message_str).unwrap()).unwrap());
+			})
 			.collect::<Vec<Vec<u8>>>();
 
 		debug::info!("ResponseData: {:?}", response_data);

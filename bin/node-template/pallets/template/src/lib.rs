@@ -267,7 +267,7 @@ impl<T: Trait> Module<T> {
 		Ok(response_data)
 	}
 	
-	fn ipfs_request_pubsub_subscribe(topic: Vec<u8>) -> Result<Vec<Vec<u8>>, Error<T>> {
+	fn ipfs_request_pubsub_subscribe(topic: Vec<u8>) -> Result<(), Error<T>> {
 		let url = &format!("{}/pubsub/sub?arg={}", HTTP_BASE_URL, String::from_utf8(topic).unwrap());
 		let body: Option<Vec<u8>> = None;
 		let request = http::Request::post(url, body);
@@ -303,13 +303,15 @@ impl<T: Trait> Module<T> {
 				let response_data_str = str::from_utf8(msg).unwrap();
 				let received_message: ReceivedMessage = serde_json::from_str(&response_data_str).unwrap();
 				let received_message_str = str::from_utf8(&received_message.data).unwrap();
-				debug::info!("Received msg: {:?}", str::from_utf8(&base64::decode(&received_message_str).unwrap()).unwrap());
+				let decoded_message = base64::decode(&received_message_str).unwrap();
+				debug::info!("Received msg: {:?}", str::from_utf8(&decoded_message).unwrap());
+				Self::offchain_signed_tx(decoded_message);
 			})
 			.collect::<Vec<Vec<u8>>>();
 
-		debug::info!("ResponseData: {:?}", response_data);
+		// debug::info!("ResponseData: {}", response_data);
 
-		Ok(response_data)
+		Ok(())
 	}
 	
 	fn ipfs_request_pubsub_publish(topic: Vec<u8>, data: Vec<u8>) -> Result<Vec<Vec<u8>>, Error<T>> {
@@ -389,9 +391,9 @@ impl<T: Trait> Module<T> {
         for cmd in pubsub_queue.into_iter() {
             match cmd {
                 PubsubCommand::Subscribe(topic) => {
-                    match Self::ipfs_request_pubsub_subscribe(topic) {
-                        Ok(data) => {
-							debug::info!("Subscribe received data: {:?}", data.clone());
+                    match Self::ipfs_request_pubsub_subscribe(topic.clone()) {
+                        Ok(_) => {
+							debug::info!("Subscribed to topic: {:?}", str::from_utf8(&topic));
 							// Self::offchain_signed_tx(data);
                         },
                         Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
@@ -399,13 +401,9 @@ impl<T: Trait> Module<T> {
                     }
                 }
                 PubsubCommand::Publish(topic, data) => {
-                    match Self::ipfs_request_pubsub_publish(topic, data) {
-                        Ok(data) => {
-                            if let Ok(str) = str::from_utf8(&data[0]) {
-                                debug::info!("IPFS: got data: {:?}", str);
-                            } else {
-                                debug::info!("IPFS: got data: {:x?}", data);
-                            };
+                    match Self::ipfs_request_pubsub_publish(topic.clone(), data.clone()) {
+                        Ok(_) => {
+							debug::info!("Published {:?} to {:?}", &data, &topic);
                         },
                         Ok(_) => unreachable!("only CatBytes can be a response for that request type; qed"),
                         Err(e) => debug::error!("IPFS: error: {:?}", e),

@@ -66,6 +66,16 @@ struct ReceivedMessage {
     data: Vec<u8>,
 }
 
+#[serde(crate = "alt_serde")]
+#[derive(Deserialize, Encode, Decode, Default)]
+struct IPNSKeyResult {
+    // Specify our own deserializing function to convert JSON string to vector of bytes
+    #[serde(deserialize_with = "de_string_to_bytes")]
+    Name: Vec<u8>,
+    #[serde(deserialize_with = "de_string_to_bytes")]
+    Id: Vec<u8>,
+}
+
 pub fn de_string_to_bytes<'de, D>(de: D) -> Result<Vec<u8>, D::Error>
 where D: Deserializer<'de> {
     let s: &str = Deserialize::deserialize(de)?;
@@ -101,6 +111,7 @@ decl_storage! {
 		pub DataQueue: Vec<DataCommand>;
 		pub PubsubQueue: Vec<PubsubCommand>;
 		pub ReceivedMessages: Vec<Vec<u8>>;
+		pub IPNSKey: Vec<u8>;
 	}
 }
 
@@ -111,6 +122,7 @@ decl_event!(
         QueuedPubsubPublished(AccountId),
         QueuedPubsubSubscribed(AccountId),
         ReceivedMessage(AccountId),
+        CommittedToNewIPNSKey(AccountId),
 	}
 );
 
@@ -189,8 +201,20 @@ decl_module! {
             Self::deposit_event(RawEvent::ReceivedMessage(who));
 			Ok(())
 		}
+		
+		/// Commit a new IPNS key on the chain
+		#[weight = 10000]
+		pub fn ipns_commit_new_key(origin, ipns_key: Vec<u8>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			debug::info!("About to commit a new IPNS key: ({:?}, {:?})", ipns_key, who);
+
+			IPNSKey::put(ipns_key);
+            Self::deposit_event(RawEvent::CommittedToNewIPNSKey(who));
+			Ok(())
+		}
 
 		fn offchain_worker(block_number: T::BlockNumber) {
+			debug::info!("IPNS KEY: {:?}", str::from_utf8(&IPNSKey::get()));
 			if let Err(e) = Self::handle_data_requests() {
 				debug::error!("IPFS: Encountered an error while processing data requests: {:?}", e);
 			}
@@ -198,12 +222,18 @@ decl_module! {
 			if let Err(e) = Self::handle_pubsub_requests() {
 				debug::error!("IPFS: Encountered an error while processing pubsub requests: {:?}", e);
 			}
+			
+			if block_number % 10.into() == 0.into() {
+				if let Err(e) = Self::handle_ipns_key_request(block_number) {
+					debug::error!("IPNS: Encountered an error while requesting a new key: {:?}", e);
+				}
+			}
 		}
 	}
 }
 
 impl<T: Trait> Module<T> {
-	fn ipfs_request_add(data: Vec<u8>) -> Result<Vec<Vec<u8>>, Error<T>> {
+	fn ipfs_request_add(data: Vec<u8>) -> Result<Vec<u8>, Error<T>> {
 		let url = &format!("{}/add", HTTP_BASE_URL);
 		let mut body: Vec<u8> = Vec::new();
 		body.extend_from_slice(format!("--{}\r\n", BOUNDARY).as_bytes());
@@ -235,12 +265,12 @@ impl<T: Trait> Module<T> {
 			return Err(<Error<T>>::HttpFetchingError);
 		}
 
-		let response_data = response.body().collect::<Vec<Vec<u8>>>();
+		let response_data = response.body().collect::<Vec<u8>>();
 
 		Ok(response_data)
 	}
 	
-	fn ipfs_request_cat(data: Vec<u8>) -> Result<Vec<Vec<u8>>, Error<T>> {
+	fn ipfs_request_cat(data: Vec<u8>) -> Result<Vec<u8>, Error<T>> {
 		let url = &format!("{}/cat?arg={}", HTTP_BASE_URL, String::from_utf8(data).unwrap());
 		let body: Option<Vec<u8>> = None;
 		let request = http::Request::post(url, body);
@@ -262,7 +292,7 @@ impl<T: Trait> Module<T> {
 			return Err(<Error<T>>::HttpFetchingError);
 		}
 
-		let response_data = response.body().collect::<Vec<Vec<u8>>>();
+		let response_data = response.body().collect::<Vec<u8>>();
 
 		Ok(response_data)
 	}
@@ -300,21 +330,21 @@ impl<T: Trait> Module<T> {
 
 		let response_data = response_body
 			.inspect(|msg| {
-				let response_data_str = str::from_utf8(msg).unwrap();
-				let received_message: ReceivedMessage = serde_json::from_str(&response_data_str).unwrap();
-				let received_message_str = str::from_utf8(&received_message.data).unwrap();
-				let decoded_message = base64::decode(&received_message_str).unwrap();
-				debug::info!("Received msg: {:?}", str::from_utf8(&decoded_message).unwrap());
-				Self::offchain_signed_tx(decoded_message);
+				// let response_data_str = str::from_utf8(msg).unwrap();
+				// let received_message: ReceivedMessage = serde_json::from_str(&response_data_str).unwrap();
+				// let received_message_str = str::from_utf8(&received_message.data).unwrap();
+				// let decoded_message = base64::decode(&received_message_str).unwrap();
+				// debug::info!("Received msg: {:?}", str::from_utf8(&decoded_message).unwrap());
+				// Self::offchain_signed_tx(decoded_message);
 			})
-			.collect::<Vec<Vec<u8>>>();
+			.collect::<Vec<u8>>();
 
 		// debug::info!("ResponseData: {}", response_data);
 
 		Ok(())
 	}
 	
-	fn ipfs_request_pubsub_publish(topic: Vec<u8>, data: Vec<u8>) -> Result<Vec<Vec<u8>>, Error<T>> {
+	fn ipfs_request_pubsub_publish(topic: Vec<u8>, data: Vec<u8>) -> Result<Vec<u8>, Error<T>> {
 		let url = &format!("{}/pubsub/pub?arg={}&arg={}", HTTP_BASE_URL, String::from_utf8(topic).unwrap(), String::from_utf8(data).unwrap());
 		let body: Option<Vec<u8>> = None;
 		let request = http::Request::post(url, body);
@@ -336,9 +366,43 @@ impl<T: Trait> Module<T> {
 			return Err(<Error<T>>::HttpFetchingError);
 		}
 
-		let response_data = response.body().collect::<Vec<Vec<u8>>>();
+		let response_data = response.body().collect::<Vec<u8>>();
 
 		Ok(response_data)
+	}
+	
+	fn ipfs_request_key_gen(block_number: T::BlockNumber) -> Result<Vec<u8>, Error<T>> {
+		let key_name = &format!("block-{:?}", block_number);
+		let url = &format!("{}/key/gen?arg={}", HTTP_BASE_URL, key_name);
+		let body: Option<Vec<u8>> = None;
+		let request = http::Request::post(url, body);
+		debug::info!("About to send the key_gen request: {:?}", request);
+		
+		let pending = request
+			.send()
+			.map_err(|err| {
+				debug::error!("Error: {:?}", err);
+				<Error<T>>::HttpFetchingError
+			})?;
+		
+		debug::info!("Pending: {:?}", pending);
+
+		let response = pending
+			.wait()
+			.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+		debug::info!("Response: {:?}", response);
+
+		if response.code != 200 {
+			debug::error!("Unexpected http request status code: {}", response.code);
+			return Err(<Error<T>>::HttpFetchingError);
+		}
+
+		let response_data = response.body().collect::<Vec<u8>>();
+		let response_data_str = str::from_utf8(&response_data).unwrap();
+		let ipns_key: IPNSKeyResult = serde_json::from_str(&response_data_str).unwrap();
+
+		Ok(ipns_key.Id)
 	}
 	
 	fn handle_data_requests() -> Result<(), Error<T>> {
@@ -355,7 +419,7 @@ impl<T: Trait> Module<T> {
                         Ok(cid) => {
                             debug::info!(
                                 "IPFS: added data with Cid {}",
-                                str::from_utf8(&cid[0]).expect("our own IPFS node can be trusted here; qed")
+                                str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
                             );
                         },
                         Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
@@ -365,7 +429,7 @@ impl<T: Trait> Module<T> {
                 DataCommand::CatBytes(data) => {
                     match Self::ipfs_request_cat(data) {
                         Ok(data) => {
-                            if let Ok(str) = str::from_utf8(&data[0]) {
+                            if let Ok(str) = str::from_utf8(&data) {
                                 debug::info!("IPFS: got data: {:?}", str);
                             } else {
                                 debug::info!("IPFS: got data: {:x?}", data);
@@ -415,13 +479,25 @@ impl<T: Trait> Module<T> {
         Ok(())
 	}
 	
+	fn handle_ipns_key_request(block_number: T::BlockNumber) -> Result<(), Error<T>> {
+		match Self::ipfs_request_key_gen(block_number) {
+			Ok(ipns_key) => {
+				debug::info!("Received IPNS key: {:?}", ipns_key);
+				Self::offchain_signed_new_ipns_key(ipns_key);
+			},
+			Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
+			Err(e) => debug::error!("IPFS: add error: {:?}", e),
+		}
+
+        Ok(())
+	}
+	
 	fn offchain_signed_tx(data: Vec<u8>) -> Result<(), Error<T>> {
 		// We retrieve a signer and check if it is valid.
 		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
 		//   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
 		//   ref: https://substrate.dev/rustdocs/v2.0.0/frame_system/offchain/struct.Signer.html
 		let signer = Signer::<T, T::AuthorityId>::any_account();
-		debug::info!("Signer");
 		
 		// `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
 		//   - `None`: no account is available for sending transaction
@@ -431,6 +507,39 @@ impl<T: Trait> Module<T> {
 			// This is the on-chain function
 			debug::info!("Result inner: {:?}", _acct.id);
 			Call::submit_data_signed(data.clone())
+		});
+
+		// Display error if the signed tx fails.
+		if let Some((acc, res)) = result {
+			if res.is_err() {
+				debug::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
+				return Err(<Error<T>>::OffchainSignedTxError);
+			}
+			// Transaction is sent successfully
+			debug::info!("Transaction was sent with the following account: {:?}", acc.id);
+			return Ok(());
+		}
+
+		// The case of `None`: no account is available for sending
+		debug::error!("No local account available");
+		Err(<Error<T>>::NoLocalAcctForSigning)
+	}
+	
+	fn offchain_signed_new_ipns_key(ipns_key: Vec<u8>) -> Result<(), Error<T>> {
+		// We retrieve a signer and check if it is valid.
+		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
+		//   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
+		//   ref: https://substrate.dev/rustdocs/v2.0.0/frame_system/offchain/struct.Signer.html
+		let signer = Signer::<T, T::AuthorityId>::any_account();
+		
+		// `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
+		//   - `None`: no account is available for sending transaction
+		//   - `Some((account, Ok(())))`: transaction is successfully sent
+		//   - `Some((account, Err(())))`: error occured when sending the transaction
+		let result = signer.send_signed_transaction(|_acct| {
+			// This is the on-chain function
+			debug::info!("Result inner: {:?}", _acct.id);
+			Call::ipns_commit_new_key(ipns_key.clone())
 		});
 
 		// Display error if the signed tx fails.

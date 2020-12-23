@@ -69,8 +69,8 @@ struct IPFSAddResult {
 }
 
 #[serde(crate = "alt_serde")]
-#[derive(Deserialize, Encode, Decode, Default)]
-struct IPNSKeyResult {
+#[derive(Deserialize, Encode, Decode, Default, Debug, Clone, PartialEq)]
+pub struct IPNSKey {
     // Specify our own deserializing function to convert JSON string to vector of bytes
     #[serde(deserialize_with = "de_string_to_bytes")]
     Name: Vec<u8>,
@@ -86,6 +86,14 @@ struct IPNSPublishResult {
     Name: Vec<u8>,
     #[serde(deserialize_with = "de_string_to_bytes")]
     Value: Vec<u8>,
+}
+
+#[serde(crate = "alt_serde")]
+#[derive(Deserialize, Encode, Decode, Default, Debug, Clone)]
+struct IPNSResolveResult {
+    // Specify our own deserializing function to convert JSON string to vector of bytes
+    #[serde(deserialize_with = "de_string_to_bytes")]
+    Path: Vec<u8>,
 }
 
 pub fn de_string_to_bytes<'de, D>(de: D) -> Result<Vec<u8>, D::Error>
@@ -116,8 +124,9 @@ decl_storage! {
 	trait Store for Module<T: Trait> as TemplateModule {
 		pub DataQueue: Vec<DataCommand>;
 		pub ReceivedMessages: Vec<Vec<u8>>;
-		pub IPNSKey: Vec<u8>;
-		pub IPNSKeyPrev: Vec<u8>;
+		pub IPNSKeyCurrent: IPNSKey;
+		pub IPNSKeyPrev: IPNSKey;
+		pub IPNSKeyExternal: IPNSKey;
 	}
 }
 
@@ -126,6 +135,7 @@ decl_event!(
 		QueuedDataToAdd(AccountId),
         QueuedDataToCat(AccountId),
         CommittedToNewIPNSKey(AccountId),
+        CommittedToNewExternalIPNSKey(AccountId),
 	}
 );
 
@@ -177,24 +187,43 @@ decl_module! {
 		
 		/// Commit a new IPNS key on the chain
 		#[weight = 10000]
-		pub fn ipns_commit_new_key(origin, ipns_key: Vec<u8>) -> DispatchResult {
+		pub fn ipns_commit_new_key(origin, ipns_key: IPNSKey) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			debug::info!("About to commit a new IPNS key: ({:?}, {:?})", ipns_key, who);
 
-			if IPNSKeyPrev::get().is_empty() {
+			if IPNSKeyPrev::get().Name.is_empty() {
 				IPNSKeyPrev::put(ipns_key.clone());
 			} else {
-				IPNSKeyPrev::put(IPNSKey::get());
+				IPNSKeyPrev::put(IPNSKeyCurrent::get());
 			}
 
-			IPNSKey::put(ipns_key);
+			IPNSKeyCurrent::put(ipns_key);
             Self::deposit_event(RawEvent::CommittedToNewIPNSKey(who));
+			Ok(())
+		}
+		
+		/// Commit a new IPNS key on the chain
+		#[weight = 10000]
+		pub fn ipns_commit_new_external_key(origin, ipns_key_id: Vec<u8>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let new_external_key = IPNSKey {
+				Id: ipns_key_id,
+				Name: b"external".to_vec()
+			};
+			debug::info!("About to commit a new external IPNS key: ({:?}, {:?})", new_external_key, who);
+
+			IPNSKeyExternal::put(new_external_key);
+            Self::deposit_event(RawEvent::CommittedToNewExternalIPNSKey(who));
 			Ok(())
 		}
 
 		fn offchain_worker(block_number: T::BlockNumber) {
-			debug::info!("IPNS KEY PREV: {:?}", str::from_utf8(&IPNSKeyPrev::get()));
-			debug::info!("IPNS KEY: {:?}", str::from_utf8(&IPNSKey::get()));
+			let key_prev = IPNSKeyPrev::get();
+			let key_curr = IPNSKeyCurrent::get();
+			let key_external = IPNSKeyExternal::get();
+			debug::info!("IPNS KEY PREV: {} - {}", str::from_utf8(&key_prev.Name).unwrap(), str::from_utf8(&key_prev.Id).unwrap());
+			debug::info!("IPNS KEY: {} - {}", str::from_utf8(&key_curr.Name).unwrap(), str::from_utf8(&key_curr.Id).unwrap());
+			debug::info!("IPNS KEY EXT: {} - {}", str::from_utf8(&key_external.Name).unwrap(), str::from_utf8(&key_external.Id).unwrap());
 
 			if let Err(e) = Self::handle_data_requests() {
 				debug::error!("IPFS: Encountered an error while processing data requests: {:?}", e);
@@ -207,6 +236,12 @@ decl_module! {
 			if block_number % 10.into() == 0.into() {
 				if let Err(e) = Self::handle_ipns_key_request(block_number) {
 					debug::error!("IPNS: Encountered an error while requesting a new key: {:?}", e);
+				}
+			}
+
+			if !key_external.Id.is_empty() {
+				if let Err(e) = Self::handle_ipns_resolve_request() {
+					debug::error!("IPNS: Encountered an error while resolving a name: {:?}", e);
 				}
 			}
 		}
@@ -280,7 +315,7 @@ impl<T: Trait> Module<T> {
 		Ok(response_data)
 	}
 	
-	fn ipns_request_key_gen(block_number: T::BlockNumber) -> Result<IPNSKeyResult, Error<T>> {
+	fn ipns_request_key_gen(block_number: T::BlockNumber) -> Result<IPNSKey, Error<T>> {
 		let key_name = &format!("block-{:?}", block_number);
 		let url = &format!("{}/key/gen?arg={}", HTTP_BASE_URL, key_name);
 		let body: Option<Vec<u8>> = None;
@@ -309,17 +344,17 @@ impl<T: Trait> Module<T> {
 
 		let response_data = response.body().collect::<Vec<u8>>();
 		let response_data_str = str::from_utf8(&response_data).unwrap();
-		let ipns_key: IPNSKeyResult = serde_json::from_str(&response_data_str).unwrap();
+		let ipns_key: IPNSKey = serde_json::from_str(&response_data_str).unwrap();
 
 		Ok(ipns_key)
 	}
 	
-	fn ipns_request_publish(ipfs_path: Vec<u8>, key_name: Vec<u8>) -> Result<IPNSPublishResult, Error<T>> {
-		if key_name.is_empty() {
+	fn ipns_request_publish(ipfs_path: Vec<u8>, key: IPNSKey) -> Result<IPNSPublishResult, Error<T>> {
+		if key.Name.is_empty() {
 			return Err(<Error<T>>::NoIPNSKeyError);
 		}
 
-		let url = &format!("{}/name/publish?arg={}&key={}", HTTP_BASE_URL, str::from_utf8(&ipfs_path).unwrap(), str::from_utf8(&key_name).unwrap());
+		let url = &format!("{}/name/publish?arg={}&key={}", HTTP_BASE_URL, str::from_utf8(&ipfs_path).unwrap(), str::from_utf8(&key.Name).unwrap());
 		let body: Option<Vec<u8>> = None;
 		let request = http::Request::post(url, body);
 		debug::info!("About to send the ipns_publish request: {:?}", request);
@@ -352,6 +387,46 @@ impl<T: Trait> Module<T> {
 		let ipns_publish_result: IPNSPublishResult = serde_json::from_str(&response_data_str).unwrap();
 
 		Ok(ipns_publish_result)
+	}
+	
+	fn ipns_request_resolve(key: IPNSKey) -> Result<IPNSResolveResult, Error<T>> {
+		if key.Id.is_empty() {
+			return Err(<Error<T>>::NoIPNSKeyError);
+		}
+
+		let url = &format!("{}/name/resolve?arg={}&nocache=true", HTTP_BASE_URL, str::from_utf8(&key.Id).unwrap());
+		let body: Option<Vec<u8>> = None;
+		let request = http::Request::post(url, body);
+		debug::info!("About to send the ipns_resolve request: {:?}", request);
+		
+		let pending = request
+			.send()
+			.map_err(|err| {
+				debug::error!("Error pending: {:?}", err);
+				<Error<T>>::HttpFetchingError
+			})?;
+		
+		debug::info!("Pending: {:?}", pending);
+
+		let response = pending
+			.wait()
+			.map_err(|err| {
+				debug::error!("Error response: {:?}", err);
+				<Error<T>>::HttpFetchingError
+			})?;
+
+		debug::info!("Response: {:?}", response);
+
+		if response.code != 200 {
+			debug::error!("Unexpected http request status code: {}", response.code);
+			return Err(<Error<T>>::HttpFetchingError);
+		}
+
+		let response_data = response.body().collect::<Vec<u8>>();
+		let response_data_str = str::from_utf8(&response_data).unwrap();
+		let ipns_resolve_result: IPNSResolveResult = serde_json::from_str(&response_data_str).unwrap();
+
+		Ok(ipns_resolve_result)
 	}
 	
 	fn handle_data_requests() -> Result<(), Error<T>> {
@@ -397,22 +472,22 @@ impl<T: Trait> Module<T> {
 	fn handle_ipns_key_request(block_number: T::BlockNumber) -> Result<(), Error<T>> {
 		match Self::ipns_request_key_gen(block_number) {
 			Ok(ipns_key) => {
-				debug::info!("Received IPNS key: {:?}", ipns_key.Id);
+				debug::info!("Received IPNS key: {:?}", ipns_key.clone().Id);
 
-				let ipns_prev_key_name = IPNSKeyPrev::get();
-				if !ipns_prev_key_name.is_empty() {
-					match Self::ipfs_request_add(ipns_key.Id) {
+				let ipns_prev_key = IPNSKeyPrev::get();
+				if !ipns_prev_key.Name.is_empty() {
+					match Self::ipfs_request_add(ipns_key.clone().Id) {
 						Ok(cid) => {
 							debug::info!(
 								"IPFS: added new key with Cid {}",
 								str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
 							);
 							
-							match Self::ipns_request_publish(cid, ipns_prev_key_name.clone()) {
+							match Self::ipns_request_publish(cid, ipns_prev_key.clone()) {
 								Ok(result) => {
 									debug::info!(
 										"IPNS: published new name under {} name",
-										str::from_utf8(&ipns_prev_key_name).expect("our own IPFS node can be trusted here; qed"),
+										str::from_utf8(&ipns_prev_key.Name).expect("our own IPFS node can be trusted here; qed"),
 									);
 								},
 								Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
@@ -424,7 +499,7 @@ impl<T: Trait> Module<T> {
 					}
 				}
 
-				Self::offchain_signed_new_ipns_key(ipns_key.Name);
+				Self::offchain_signed_new_ipns_key(ipns_key);
 			},
 			Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
 			Err(e) => debug::error!("IPFS: add error: {:?}", e),
@@ -442,7 +517,7 @@ impl<T: Trait> Module<T> {
 					str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
 				);
 
-				match Self::ipns_request_publish(cid, IPNSKey::get()) {
+				match Self::ipns_request_publish(cid, IPNSKeyCurrent::get()) {
 					Ok(result) => {
 						debug::info!(
 							"IPNS: published new data under {} name",
@@ -460,7 +535,34 @@ impl<T: Trait> Module<T> {
         Ok(())
 	}
 	
-	fn offchain_signed_new_ipns_key(ipns_key: Vec<u8>) -> Result<(), Error<T>> {
+	fn handle_ipns_resolve_request() -> Result<(), Error<T>> {
+		match Self::ipns_request_resolve(IPNSKeyExternal::get()) {
+			Ok(result) => {
+				debug::info!(
+					"IPNS: resolved IPNS name and got {}",
+					str::from_utf8(&result.clone().Path).expect("our own IPFS node can be trusted here; qed")
+				);
+
+				match Self::ipfs_request_cat(result.Path) {
+					Ok(data) => {
+						if let Ok(str) = str::from_utf8(&data) {
+							debug::info!("IPFS: got data behind IPNS name: {:?}", str);
+						} else {
+							debug::info!("IPFS: got data behind IPNS name: {:x?}", data);
+						};
+					},
+					Ok(_) => unreachable!("only CatBytes can be a response for that request type; qed"),
+					Err(e) => debug::error!("IPFS: error: {:?}", e),
+				}
+			},
+			Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
+			Err(e) => debug::error!("IPFS: add error: {:?}", e),
+		}
+
+        Ok(())
+	}
+	
+	fn offchain_signed_new_ipns_key(ipns_key: IPNSKey) -> Result<(), Error<T>> {
 		// We retrieve a signer and check if it is valid.
 		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
 		//   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,

@@ -29,9 +29,11 @@ use sp_std::{str, vec::Vec};
 
 pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"demo");
 pub const HTTP_BASE_URL: &str = "http://127.0.0.1:5001/api/v0";
+
+// This is needed for POSTing form-data (see the `ipfs_request_add` method)
 const BOUNDARY: &'static str = "------------------------ea3bbcf87c101592";
 
-static TOPIC: &'static str = "topos";
+// The crypto module is needed for signed extrinsics that are committed by the offchain worker
 
 /// Based on the above `KeyTypeId` we need to generate a pallet-specific crypto type wrapper.
 /// We can utilize the supported crypto kinds (`sr25519`, `ed25519` and `ecdsa`) and augment
@@ -55,6 +57,9 @@ pub mod crypto {
 		type GenericPublic = sp_core::sr25519::Public;
 	}
 }
+
+// The following structs below are needed in the parsing of the HTTP requests JSON responses
+// See https://substrate.dev/recipes/off-chain-workers/http-json.html
 
 #[serde(crate = "alt_serde")]
 #[derive(Deserialize, Encode, Decode, Default)]
@@ -109,11 +114,14 @@ mod mock;
 mod tests;
 
 pub trait Trait: frame_system::Trait + CreateSignedTransaction<Call<Self>> {
+	// We add the AuthorityId in order to commit signed extrinsics from the offchain worker
 	type AuthorityId: AppCrypto<Self::Public, Self::Signature>;
 	type Call: From<Call<Self>>;
 	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
 }
 
+// This logic of commands is taken from rs-ipfs' substrate fork. The idea is to submit
+// commands at any time via extrinsics and let the offchain worker pick them at block import
 #[derive(Encode, Decode, PartialEq)]
 enum DataCommand {
     AddBytes(Vec<u8>),
@@ -124,8 +132,16 @@ decl_storage! {
 	trait Store for Module<T: Trait> as TemplateModule {
 		pub DataQueue: Vec<DataCommand>;
 		pub ReceivedMessages: Vec<Vec<u8>>;
+
+		// The current key under which the worker will publish data on IPNS
 		pub IPNSKeyCurrent: IPNSKey;
-		pub IPNSKeyPrev: IPNSKey;
+
+		// Same but the previous one. We need it for the worker to publish under it the new key, so that
+		// data resolver (e.g. another chain) can be redirected to the right key
+		pub IPNSKeyPrev: IPNSKey;  
+
+		// Same but an external one. This is used by the other chain only, set via an extrinsic to start
+		// resolving data under that key.
 		pub IPNSKeyExternal: IPNSKey;
 	}
 }
@@ -202,7 +218,7 @@ decl_module! {
 			Ok(())
 		}
 		
-		/// Commit a new IPNS key on the chain
+		/// Commit a new external IPNS key on the chain (only for the other chain)
 		#[weight = 10000]
 		pub fn ipns_commit_new_external_key(origin, ipns_key_id: Vec<u8>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
@@ -217,7 +233,10 @@ decl_module! {
 			Ok(())
 		}
 
+		// This is where the offchain worker magic happens: at every block import, this function is called, with the block height as an argument.
+		// We use this entrypoint to trigger the offchain logic, whether it is related to commands created by extrinsics, or periodical logic.
 		fn offchain_worker(block_number: T::BlockNumber) {
+			// We print all the three IPNS keys, just to keep track of the current state
 			let key_prev = IPNSKeyPrev::get();
 			let key_curr = IPNSKeyCurrent::get();
 			let key_external = IPNSKeyExternal::get();
@@ -225,20 +244,26 @@ decl_module! {
 			debug::info!("IPNS KEY: {} - {}", str::from_utf8(&key_curr.Name).unwrap(), str::from_utf8(&key_curr.Id).unwrap());
 			debug::info!("IPNS KEY EXT: {} - {}", str::from_utf8(&key_external.Name).unwrap(), str::from_utf8(&key_external.Id).unwrap());
 
+			// If any, pick the data requests/commands and execute them
 			if let Err(e) = Self::handle_data_requests() {
 				debug::error!("IPFS: Encountered an error while processing data requests: {:?}", e);
 			}
 
+			// Publish the current block height to IPNS, under the current key
 			if let Err(e) = Self::handle_ipns_publish_request(block_number) {
 				debug::error!("IPNS: Encountered an error while publishing a block: {:?}", e);
 			}
 			
+			// At every 10 blocks, we generate a new key, and publish it under the previous one
+			// (for data resolver to be able to discover the new key)
 			if block_number % 10.into() == 0.into() {
 				if let Err(e) = Self::handle_ipns_key_request(block_number) {
 					debug::error!("IPNS: Encountered an error while requesting a new key: {:?}", e);
 				}
 			}
 
+			// If there is a committed external key (meaning this chain is the other one / the data resolver)
+			// we resolve data under it. If the data is a key itself, we commit it on chain (and replace the prev one)
 			if !key_external.Id.is_empty() {
 				if let Err(e) = Self::handle_ipns_resolve_request() {
 					debug::error!("IPNS: Encountered an error while resolving a name: {:?}", e);
@@ -249,6 +274,10 @@ decl_module! {
 }
 
 impl<T: Trait> Module<T> {
+	// All "request" methods here contain duplicated code, this is just for prototyping, no efforts were made to
+	// have clean code (mainly to circumvent the very slow programming pace due to the lack of xp of rust programming)
+	//
+	// You'll find "ip[f|n]s_request" methods and "handle" methods. The latters call the former and handle errors.
 	fn ipfs_request_add(data: Vec<u8>) -> Result<Vec<u8>, Error<T>> {
 		let url = &format!("{}/add", HTTP_BASE_URL);
 		let mut body: Vec<u8> = Vec::new();
@@ -470,19 +499,30 @@ impl<T: Trait> Module<T> {
     }
 	
 	fn handle_ipns_key_request(block_number: T::BlockNumber) -> Result<(), Error<T>> {
+		// We generate a key, passing the block height to name the key after it
 		match Self::ipns_request_key_gen(block_number) {
 			Ok(ipns_key) => {
 				debug::info!("Received IPNS key: {:?}", ipns_key.clone().Id);
 
+				// Here the prev key is the current one because we haven't committed the new one on chain
+				// This will need a much better handling (there might be situations when a new block is imported
+				// before this request has completed, so the new key might be already committed)
 				let ipns_prev_key = IPNSKeyCurrent::get();
+
+				// This logic is to public under the prev key the new key (for data resolvers)
+				// We dive here only if there was already a key before (we don't want to do this logic the first time)
 				if !ipns_prev_key.Name.is_empty() {
+					// We publish the key on IPFS because on IPNS we don't publish data, we publish the address of data published on IPFS
+					// i.e. an IPFS path/cid/hash (e.g. Qwm...)
 					match Self::ipfs_request_add(ipns_key.clone().Id) {
+						// "cid" here is the path to the new key published on IPFS
 						Ok(cid) => {
 							debug::info!(
 								"IPFS: added new key with Cid {}",
 								str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
 							);
 							
+							// Now that we have the path to the new key published on IPFS, we can publish that path on IPNS, under the prev key
 							match Self::ipns_request_publish(cid, ipns_prev_key.clone()) {
 								Ok(result) => {
 									debug::info!(
@@ -510,6 +550,8 @@ impl<T: Trait> Module<T> {
 	
 	fn handle_ipns_publish_request(block_number: T::BlockNumber) -> Result<(), Error<T>> {
 		let block_number_string = &format!("{:?}", block_number);
+		// Just as in the previous method, we have to publish the data on IPFS before publishing its
+		// address on IPNS
 		match Self::ipfs_request_add(block_number_string.as_bytes().to_vec()) {
 			Ok(cid) => {
 				debug::info!(
@@ -536,6 +578,8 @@ impl<T: Trait> Module<T> {
 	}
 	
 	fn handle_ipns_resolve_request() -> Result<(), Error<T>> {
+		// This function is only for the other chain, the data resolver
+		// We go resolve the data published under the external key that was provided via the extrinsic
 		match Self::ipns_request_resolve(IPNSKeyExternal::get()) {
 			Ok(result) => {
 				debug::info!(
@@ -543,6 +587,7 @@ impl<T: Trait> Module<T> {
 					str::from_utf8(&result.clone().Path).expect("our own IPFS node can be trusted here; qed")
 				);
 
+				// Having the address of the content, now we go fetch it on IPFS
 				match Self::ipfs_request_cat(result.Path) {
 					Ok(data) => {
 						if let Ok(str) = str::from_utf8(&data) {
@@ -551,6 +596,9 @@ impl<T: Trait> Module<T> {
 							debug::info!("IPFS: got data behind IPNS name: {:x?}", data);
 						};
 
+						// If the content (string) is longer than 4 characters, we assume it's not a block height but
+						// rather a new IPNS key. In that case, we commit it on chain so that the offchain worker resolve data
+						// under the right key
 						if data.len() > 4 {
 							let new_key = IPNSKey {
 								Id: data,
@@ -570,6 +618,7 @@ impl<T: Trait> Module<T> {
         Ok(())
 	}
 	
+	// Method for a worker to submit a signed extrinsic for a new IPNS key
 	fn offchain_signed_new_ipns_key(ipns_key: IPNSKey) -> Result<(), Error<T>> {
 		// We retrieve a signer and check if it is valid.
 		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
@@ -603,6 +652,7 @@ impl<T: Trait> Module<T> {
 		Err(<Error<T>>::NoLocalAcctForSigning)
 	}
 	
+	// Method for a worker to submit a signed extrinsic for a new external IPNS key
 	fn offchain_signed_new_ipns_external_key(ipns_key: IPNSKey) -> Result<(), Error<T>> {
 		// We retrieve a signer and check if it is valid.
 		//   Since this pallet only has one key in the keystore. We use `any_account()1 to

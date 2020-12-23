@@ -204,11 +204,15 @@ decl_module! {
 		
 		/// Commit a new IPNS key on the chain
 		#[weight = 10000]
-		pub fn ipns_commit_new_external_key(origin, ipns_key: IPNSKey) -> DispatchResult {
+		pub fn ipns_commit_new_external_key(origin, ipns_key_id: Vec<u8>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			debug::info!("About to commit a new external IPNS key: ({:?}, {:?})", ipns_key, who);
+			let new_external_key = IPNSKey {
+				Id: ipns_key_id,
+				Name: b"external".to_vec()
+			};
+			debug::info!("About to commit a new external IPNS key: ({:?}, {:?})", new_external_key, who);
 
-			IPNSKeyExternal::put(ipns_key);
+			IPNSKeyExternal::put(new_external_key);
             Self::deposit_event(RawEvent::CommittedToNewExternalIPNSKey(who));
 			Ok(())
 		}
@@ -613,7 +617,7 @@ impl<T: Trait> Module<T> {
 		let result = signer.send_signed_transaction(|_acct| {
 			// This is the on-chain function
 			debug::info!("Result inner: {:?}", _acct.id);
-			Call::ipns_commit_new_external_key(ipns_key.clone())
+			Call::ipns_commit_new_external_key(ipns_key.clone().Id)
 		});
 
 		// Display error if the signed tx fails.

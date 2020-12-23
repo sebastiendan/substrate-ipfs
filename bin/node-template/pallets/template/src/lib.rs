@@ -204,15 +204,11 @@ decl_module! {
 		
 		/// Commit a new IPNS key on the chain
 		#[weight = 10000]
-		pub fn ipns_commit_new_external_key(origin, ipns_key_id: Vec<u8>) -> DispatchResult {
+		pub fn ipns_commit_new_external_key(origin, ipns_key: IPNSKey) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			let new_external_key = IPNSKey {
-				Id: ipns_key_id,
-				Name: b"external".to_vec()
-			};
-			debug::info!("About to commit a new external IPNS key: ({:?}, {:?})", new_external_key, who);
+			debug::info!("About to commit a new external IPNS key: ({:?}, {:?})", ipns_key, who);
 
-			IPNSKeyExternal::put(new_external_key);
+			IPNSKeyExternal::put(ipns_key);
             Self::deposit_event(RawEvent::CommittedToNewExternalIPNSKey(who));
 			Ok(())
 		}
@@ -550,6 +546,14 @@ impl<T: Trait> Module<T> {
 						} else {
 							debug::info!("IPFS: got data behind IPNS name: {:x?}", data);
 						};
+
+						if data.len() > 4 {
+							let new_key = IPNSKey {
+								Id: data,
+								Name: b"external".to_vec()
+							};
+							Self::offchain_signed_new_ipns_external_key(new_key);
+						}
 					},
 					Ok(_) => unreachable!("only CatBytes can be a response for that request type; qed"),
 					Err(e) => debug::error!("IPFS: error: {:?}", e),
@@ -577,6 +581,39 @@ impl<T: Trait> Module<T> {
 			// This is the on-chain function
 			debug::info!("Result inner: {:?}", _acct.id);
 			Call::ipns_commit_new_key(ipns_key.clone())
+		});
+
+		// Display error if the signed tx fails.
+		if let Some((acc, res)) = result {
+			if res.is_err() {
+				debug::error!("failure: offchain_signed_tx: tx sent: {:?}", acc.id);
+				return Err(<Error<T>>::OffchainSignedTxError);
+			}
+			// Transaction is sent successfully
+			debug::info!("Transaction was sent with the following account: {:?}", acc.id);
+			return Ok(());
+		}
+
+		// The case of `None`: no account is available for sending
+		debug::error!("No local account available");
+		Err(<Error<T>>::NoLocalAcctForSigning)
+	}
+	
+	fn offchain_signed_new_ipns_external_key(ipns_key: IPNSKey) -> Result<(), Error<T>> {
+		// We retrieve a signer and check if it is valid.
+		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
+		//   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
+		//   ref: https://substrate.dev/rustdocs/v2.0.0/frame_system/offchain/struct.Signer.html
+		let signer = Signer::<T, T::AuthorityId>::any_account();
+		
+		// `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
+		//   - `None`: no account is available for sending transaction
+		//   - `Some((account, Ok(())))`: transaction is successfully sent
+		//   - `Some((account, Err(())))`: error occured when sending the transaction
+		let result = signer.send_signed_transaction(|_acct| {
+			// This is the on-chain function
+			debug::info!("Result inner: {:?}", _acct.id);
+			Call::ipns_commit_new_external_key(ipns_key.clone())
 		});
 
 		// Display error if the signed tx fails.

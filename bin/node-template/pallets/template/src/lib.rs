@@ -474,7 +474,7 @@ impl<T: Trait> Module<T> {
 			Ok(ipns_key) => {
 				debug::info!("Received IPNS key: {:?}", ipns_key.clone().Id);
 
-				let ipns_prev_key = IPNSKeyPrev::get();
+				let ipns_prev_key = IPNSKeyCurrent::get();
 				if !ipns_prev_key.Name.is_empty() {
 					match Self::ipfs_request_add(ipns_key.clone().Id) {
 						Ok(cid) => {

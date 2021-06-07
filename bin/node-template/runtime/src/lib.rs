@@ -509,6 +509,12 @@ impl_runtime_apis! {
 		}
 	}
 
+	impl node_template_runtime_api::NodeTemplateApi<Block> for Runtime {
+        fn get_data_command() -> u32 {
+            TemplateModule::get_data_command()
+        }
+    }
+
 	#[cfg(feature = "runtime-benchmarks")]
 	impl frame_benchmarking::Benchmark<Block> for Runtime {
 		fn dispatch_benchmark(

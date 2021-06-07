@@ -123,7 +123,7 @@ pub trait Trait: frame_system::Trait + CreateSignedTransaction<Call<Self>> {
 // This logic of commands is taken from rs-ipfs' substrate fork. The idea is to submit
 // commands at any time via extrinsics and let the offchain worker pick them at block import
 #[derive(Encode, Decode, PartialEq)]
-enum DataCommand {
+pub enum DataCommand {
     AddBytes(Vec<u8>),
     CatBytes(Vec<u8>),
 }
@@ -684,5 +684,9 @@ impl<T: Trait> Module<T> {
 		// The case of `None`: no account is available for sending
 		debug::error!("No local account available");
 		Err(<Error<T>>::NoLocalAcctForSigning)
+	}
+
+	pub fn get_data_command() -> Vec<DataCommand> {
+		DataQueue::get()
 	}
 }

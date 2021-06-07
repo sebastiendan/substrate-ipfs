@@ -55,6 +55,10 @@ pub fn create_full<C, P>(
 		TransactionPaymentApi::to_delegate(TransactionPayment::new(client.clone()))
 	);
 
+	io.extend_with(node_template_rpc::NodeTemplateRpc::to_delegate(
+		node_template_rpc::NodeTemplateRpc::to_delegate(node_template_rpc::NodeTemplate::new(client))
+	));
+
 	// Extend this RPC with a custom API by using the following syntax.
 	// `YourRpcStruct` should have a reference to a client, which is needed
 	// to call into the runtime.

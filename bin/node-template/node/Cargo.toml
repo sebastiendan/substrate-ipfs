@@ -51,6 +51,9 @@ frame-benchmarking-cli = { version = "2.0.0", path = "../../../utils/frame/bench
 
 node-template-runtime = { version = "2.0.0", path = "../runtime" }
 
+node-template-rpc = { path = "../pallets/template/rpc" }
+node-template-runtime-api = { path = "../pallets/template/runtime-api" }
+
 [build-dependencies]
 substrate-build-script-utils = { version = "2.0.0", path = "../../../utils/build-script-utils" }
 
